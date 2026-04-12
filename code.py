@@ -2,6 +2,7 @@ import alarm
 import board
 import digitalio
 import neopixel
+import os
 import time
 import wifi
 
@@ -40,39 +41,67 @@ class Atom:
             self.pixels.show()
     def __init__(self):
         self.display = self.Display()
+
+class WiFi:
+    def __init__(self):
+        self._ssid = os.getenv("CIRCUITPY_WIFI_SSID")
+        self._pass = os.getenv("CIRCUITPY_WIFI_PASSWORD")
+        self.pool = adafruit_connection_manager.get_radio_socketpool(wifi.radio)
+        self.ssl_context = adafruit_connection_manager.get_radio_ssl_context(wifi.radio)
+        self.requests = adafruit_requests.Session(self.pool, self.ssl_context)
+    def connect(self, retries=5):
+        """Manually reconnects using the stored credentials."""
+        if wifi.radio.connected:
+            return True
+            
+        print(f"Connecting to {self._ssid}...")
+        for _ in range(retries):
+            try:
+                # credentials must be passed here manually
+                wifi.radio.connect(self._ssid, self._pass)
+                print(f"Connected! IP: {wifi.radio.ipv4_address}")
+                return True
+            except Exception as e:
+                print(f"Retry failed: {e}")
+                time.sleep(1)
+        return False
+    def get(self, url, timeout=10):
+        self.connect()
+        return self.requests.get(url, timeout=timeout)
         
 class Tasmota:
     def __init__(self, ip):
         self.ip = ip
-        self.pool = adafruit_connection_manager.get_radio_socketpool(wifi.radio)
-        self.ssl_context = adafruit_connection_manager.get_radio_ssl_context(wifi.radio)
-        self.requests = adafruit_requests.Session(self.pool, self.ssl_context)
+        self.wifi = WiFi()
+        
+        data = self.status5()
+        data = data.get("StatusNET", {})
+        hostname = data.get("Hostname", "Unknown")
 
         print(f'Status URL:  {self.status_url}')
         print(f'Toggle URL:  {self.toggle_url}')
+        print(f'Hostname:    {hostname}')
 
-    def toggle(self):
+    def fetch(self, url, timeout=10):
         try:
-            print(f"Sending Toggle to {self.toggle_url}...")
-            with self.requests.get(self.toggle_url, timeout=5) as r:
+            print(f"Fetching from {url}...")
+            with self.wifi.get(url, timeout=timeout) as r:
                 json = r.json()
-                print("Toggle sent, status:", r.status_code)
-                print('Toggle data returned: ', json)
+                print("Fetch status:", r.status_code)
+                print('Fetched data: ', json)
                 return json
-        except Exception as e:
-            print("Toggle failed:", e)
-        return None
-
-    def power_status(self):
-        try:
-            print("Fetching status...")
-            with self.requests.get(self.status_url, timeout=10) as response:
-                data = response.json()
-                print('data: ', data)
-                return data
         except Exception as e:
             print("Fetch failed:", e)
         return None
+
+    def toggle(self):
+        return self.fetch(self.toggle_url)
+
+    def power_status(self):
+        return self.fetch(self.status_url)
+
+    def status5(self):
+        return self.fetch(self.status5_url)
 
     @property
     def status_url(self):
@@ -81,6 +110,10 @@ class Tasmota:
     @property
     def toggle_url(self):
         return f"http://192.168.1.{self.ip}/cm?cmnd=Power+TOGGLE"
+
+    @property
+    def status5_url(self):
+        return f"http://192.168.1.{self.ip}/cm?cmnd=Status%205"
 
 atom = Atom()
 #tasmota = Tasmota(178)  #  upper grow light
