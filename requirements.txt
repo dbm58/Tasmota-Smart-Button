@@ -1,0 +1,5 @@
+adafruit_debouncer==2.0.13
+adafruit_requests==4.1.15
+adafruit_connection_manager==3.1.6
+neopixel==6.3.20
+adafruit_ticks==1.1.5
