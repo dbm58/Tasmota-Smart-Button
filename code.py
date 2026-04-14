@@ -1,6 +1,7 @@
 import alarm
 import board
 import digitalio
+import gc
 import neopixel
 import os
 import time
@@ -8,7 +9,42 @@ import wifi
 
 import adafruit_connection_manager
 from adafruit_debouncer import Debouncer
+import adafruit_logging as logging
 import adafruit_requests
+
+class Logger:
+    def __init__(self, name="atom_logger"):
+        self._logger = logging.getLogger(name)
+        
+        env_level = os.getenv("LOG_LEVEL", "INFO").upper()
+        
+        # Map string levels to the library constants
+        levels = {
+            "DEBUG": logging.DEBUG,
+            "INFO": logging.INFO,
+            "WARNING": logging.WARNING,
+            "ERROR": logging.ERROR,
+            "CRITICAL": logging.CRITICAL
+        }
+        
+        self._logger.setLevel(levels.get(env_level, logging.INFO))
+        
+    def debug(self, msg):
+        self._logger.debug(msg)
+
+    def info(self, msg):
+        self._logger.info(msg)
+
+    def warning(self, msg):
+        self._logger.warning(msg)
+
+    def error(self, msg):
+        self._logger.error(msg)
+
+    def critical(self, msg):
+        self._logger.critical(msg)
+
+logger = Logger()
 
 # --- CONFIGURATION ---
 CHECK_INTERVAL = 60 
@@ -30,6 +66,9 @@ class Atom:
                 Atom.Display.PIXEL_COUNT,
                 brightness=Atom.Display.BRIGHTNESS,
                 auto_write=False)
+        def clear(self):
+            self.pixels.fill(Color.OFF)
+            self.pixels.show()
         @property
         def color(self):
             return tuple(self.pixels[0]) 
@@ -41,6 +80,25 @@ class Atom:
             self.pixels.show()
     def __init__(self):
         self.display = self.Display()
+    def health_report(self):
+        fs_stat = os.statvfs("/")
+        
+        # Calculate free space in Bytes
+        block_size = fs_stat[0]
+        free_blocks = fs_stat[3]
+        total_blocks = fs_stat[2]
+        
+        free_kb = (free_blocks * block_size) / 1024
+        total_kb = (total_blocks * block_size) / 1024
+
+        gc.collect() # Clean up before measuring
+        free_ram = gc.mem_free() / 1024
+
+        logger.info('=' * 60)
+        logger.info('M5Stack Atom Matrix:  Health Report')
+        logger.info(f"Storage: {free_kb:.2f} KB free / {total_kb:.2f} KB total")
+        logger.info(f"RAM:     {free_ram:.2f} KB free")
+        logger.info('=' * 60)
 
 class WiFi:
     def __init__(self):
@@ -49,22 +107,24 @@ class WiFi:
         self.pool = adafruit_connection_manager.get_radio_socketpool(wifi.radio)
         self.ssl_context = adafruit_connection_manager.get_radio_ssl_context(wifi.radio)
         self.requests = adafruit_requests.Session(self.pool, self.ssl_context)
+        
     def connect(self, retries=5):
         """Manually reconnects using the stored credentials."""
         if wifi.radio.connected:
             return True
             
-        print(f"Connecting to {self._ssid}...")
+        logger.info(f"Connecting to {self._ssid}...")
         for _ in range(retries):
             try:
                 # credentials must be passed here manually
                 wifi.radio.connect(self._ssid, self._pass)
-                print(f"Connected! IP: {wifi.radio.ipv4_address}")
+                logger.info(f"Connected! IP: {wifi.radio.ipv4_address}")
                 return True
             except Exception as e:
-                print(f"Retry failed: {e}")
+                logger.error(f"Retry failed: {e}")
                 time.sleep(1)
         return False
+        
     def get(self, url, timeout=10):
         self.connect()
         return self.requests.get(url, timeout=timeout)
@@ -74,24 +134,20 @@ class Tasmota:
         self.ip = ip
         self.wifi = WiFi()
         
-        data = self.status5()
-        data = data.get("StatusNET", {})
-        hostname = data.get("Hostname", "Unknown")
-
-        print(f'Status URL:  {self.status_url}')
-        print(f'Toggle URL:  {self.toggle_url}')
-        print(f'Hostname:    {hostname}')
+        logger.info(f'Status URL:  {self.status_url}')
+        logger.info(f'Toggle URL:  {self.toggle_url}')
+        logger.info(f'Hostname:    {self.hostname}')
 
     def fetch(self, url, timeout=10):
         try:
-            print(f"Fetching from {url}...")
+            logger.info(f"Fetching from {url}...")
             with self.wifi.get(url, timeout=timeout) as r:
                 json = r.json()
-                print("Fetch status:", r.status_code)
-                print('Fetched data: ', json)
+                logger.info(f"Fetch status: {r.status_code}")
+                logger.info(f'Fetched data: {json}')
                 return json
         except Exception as e:
-            print("Fetch failed:", e)
+            logger.error(f"Fetch failed: {e}")
         return None
 
     def toggle(self):
@@ -102,6 +158,17 @@ class Tasmota:
 
     def status5(self):
         return self.fetch(self.status5_url)
+
+    @property
+    def hostname(self):
+        data = self.status5()
+        if data is None:
+            return 'Unknown'
+        data = data.get("StatusNET", {})
+        if data is None:
+            return 'Unknown'
+        hostname = data.get("Hostname", "Unknown")
+        return hostname
 
     @property
     def status_url(self):
@@ -116,10 +183,13 @@ class Tasmota:
         return f"http://192.168.1.{self.ip}/cm?cmnd=Status%205"
 
 atom = Atom()
+atom.display.clear()
+atom.health_report()
 #tasmota = Tasmota(178)  #  upper grow light
 #tasmota = Tasmota(234)  #  basement space heater
 tasmota = Tasmota(120)  #  main grow light
 
+#  this, and wait_for_next... belong in Main()
 def update_display(data):
     if data == None:
         atom.display.color = Color.RED
@@ -150,7 +220,7 @@ def wait_for_next_check(duration):
                 button_was_down = True
                     
             if button.rose:
-                print("Button released! Sending toggle...")
+                logger.info("Button released! Sending toggle...")
                 data = tasmota.toggle()
                 update_display(data)
                 button_was_down = False # Reset the flag
@@ -164,6 +234,12 @@ def wait_for_next_check(duration):
                 
             t_alarm = alarm.time.TimeAlarm(monotonic_time=time.monotonic() + 0.2)
             alarm.light_sleep_until_alarms(t_alarm)
+
+#  something like:
+#  main = Main()
+#  main.health_check()
+#      .ap_mode()
+#      .polling_loop()
 
 while True:
     data = tasmota.power_status()
