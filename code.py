@@ -80,25 +80,6 @@ class Atom:
             self.pixels.show()
     def __init__(self):
         self.display = self.Display()
-    def health_report(self):
-        fs_stat = os.statvfs("/")
-        
-        # Calculate free space in Bytes
-        block_size = fs_stat[0]
-        free_blocks = fs_stat[3]
-        total_blocks = fs_stat[2]
-        
-        free_kb = (free_blocks * block_size) / 1024
-        total_kb = (total_blocks * block_size) / 1024
-
-        gc.collect() # Clean up before measuring
-        free_ram = gc.mem_free() / 1024
-
-        logger.info('=' * 60)
-        logger.info('M5Stack Atom Matrix:  Health Report')
-        logger.info(f"Storage: {free_kb:.2f} KB free / {total_kb:.2f} KB total")
-        logger.info(f"RAM:     {free_ram:.2f} KB free")
-        logger.info('=' * 60)
 
 class WiFi:
     def __init__(self):
@@ -125,39 +106,32 @@ class WiFi:
                 time.sleep(1)
         return False
         
-    def get(self, url, timeout=10):
-        self.connect()
-        return self.requests.get(url, timeout=timeout)
+    def fetch(self, url, timeout=10):
+        try:
+            logger.debug(f"Fetching from {url}...")
+            self.connect()
+            with self.requests.get(url, timeout=timeout) as r:
+                json = r.json()
+                logger.debug(f"Fetch status: {r.status_code}")
+                logger.debug(f'Fetched data: {json}')
+                return json
+        except Exception as e:
+            logger.error(f"Fetch failed: {e}")
+        return None
         
 class Tasmota:
     def __init__(self, ip):
         self.ip = ip
         self.wifi = WiFi()
         
-        logger.info(f'Status URL:  {self.status_url}')
-        logger.info(f'Toggle URL:  {self.toggle_url}')
-        logger.info(f'Hostname:    {self.hostname}')
-
-    def fetch(self, url, timeout=10):
-        try:
-            logger.info(f"Fetching from {url}...")
-            with self.wifi.get(url, timeout=timeout) as r:
-                json = r.json()
-                logger.info(f"Fetch status: {r.status_code}")
-                logger.info(f'Fetched data: {json}')
-                return json
-        except Exception as e:
-            logger.error(f"Fetch failed: {e}")
-        return None
-
     def toggle(self):
-        return self.fetch(self.toggle_url)
+        return self.wifi.fetch(self.toggle_url)
 
     def power_status(self):
-        return self.fetch(self.status_url)
+        return self.wifi.fetch(self.status_url)
 
     def status5(self):
-        return self.fetch(self.status5_url)
+        return self.wifi.fetch(self.status5_url)
 
     @property
     def hostname(self):
@@ -182,67 +156,101 @@ class Tasmota:
     def status5_url(self):
         return f"http://192.168.1.{self.ip}/cm?cmnd=Status%205"
 
-atom = Atom()
-atom.display.clear()
-atom.health_report()
-#tasmota = Tasmota(178)  #  upper grow light
-#tasmota = Tasmota(234)  #  basement space heater
-tasmota = Tasmota(120)  #  main grow light
-
-#  this, and wait_for_next... belong in Main()
-def update_display(data):
-    if data == None:
-        atom.display.color = Color.RED
-        return
-    power = data.get("POWER", "OFF")
-    if power == 'ON':
-        atom.display.color = Color.GREEN
-        return
-    atom.display.color = Color.OFF
-
-def wait_for_next_check(duration):
-    """Polls the button frequently while appearing to sleep."""
-    start_time = time.monotonic()
-    button_was_down = False
+class App():
+    def __init__(self):
+        self.atom = Atom()
+        self.atom.display.clear()
+        #atom.health_report()
+        #tasmota = Tasmota(178)  #  upper grow light
+        #tasmota = Tasmota(234)  #  basement space heater
+        self.tasmota = Tasmota(120)  #  main grow light
     
-    # We use digitalio here because PinAlarm is too sensitive to noise on this board
-    with digitalio.DigitalInOut(board.BTN) as pin:
-        pin.direction = digitalio.Direction.INPUT
-        pin.pull = None # Atom has external pull-up
-        button = Debouncer(pin, interval=0.05) # 50ms debounce helps filter noise
+    def health_check(self):
+        fs_stat = os.statvfs("/")
+        
+        # Calculate free space in Bytes
+        block_size = fs_stat[0]
+        free_blocks = fs_stat[3]
+        total_blocks = fs_stat[2]
+        
+        free_kb = (free_blocks * block_size) / 1024
+        total_kb = (total_blocks * block_size) / 1024
 
+        gc.collect() # Clean up before measuring
+        free_ram = gc.mem_free() / 1024
+
+        logger.info('=' * 60)
+        logger.info('M5Stack Atom Matrix:  Health Report')
+        logger.info(f"Storage:     {free_kb:.2f} KB free / {total_kb:.2f} KB total")
+        logger.info(f"RAM:         {free_ram:.2f} KB free")
+        logger.info('=' * 60)
+        logger.info('Tasmota Info')
+        logger.info(f'Status URL:  {self.tasmota.status_url}')
+        logger.info(f'Toggle URL:  {self.tasmota.toggle_url}')
+        logger.info(f'Hostname:    {self.tasmota.hostname}')
+        logger.info('=' * 60)
+
+        return self
+        
+    def config_mode(self):
+        return self
+        
+    def main(self):
         while True:
-            button.update()
-            now = time.monotonic()
-
-            if not button.value: 
-                atom.display.color = Color.YELLOW
-                button_was_down = True
+            data = self.tasmota.power_status()
+            self._update_display(data)
+            self._wait_for_next_check(CHECK_INTERVAL)
+            
+        return self
+        
+    def _wait_for_next_check(self, duration):
+        """Polls the button frequently while appearing to sleep."""
+        start_time = time.monotonic()
+        button_was_down = False
+        
+        # We use digitalio here because PinAlarm is too sensitive to noise on this board
+        with digitalio.DigitalInOut(board.BTN) as pin:
+            pin.direction = digitalio.Direction.INPUT
+            pin.pull = None # Atom has external pull-up
+            button = Debouncer(pin, interval=0.05) # 50ms debounce helps filter noise
+    
+            while True:
+                button.update()
+                now = time.monotonic()
+    
+                if not button.value: 
+                    self.atom.display.color = Color.YELLOW
+                    button_was_down = True
+                        
+                if button.rose:
+                    logger.info("Button released! Sending toggle...")
+                    data = self.tasmota.toggle()
+                    self._update_display(data)
+                    button_was_down = False # Reset the flag
+                    start_time = now        # Reset the 60s timer
                     
-            if button.rose:
-                logger.info("Button released! Sending toggle...")
-                data = tasmota.toggle()
-                update_display(data)
-                button_was_down = False # Reset the flag
-                start_time = now        # Reset the 60s timer
-                
-            # EXIT CONDITIONS:
-            # 1. We've exceeded duration AND the button isn't currently held
-            # 2. AND we aren't mid-interaction (waiting for a release)
-            if (now - start_time >= duration) and button.value and not button_was_down:
-                break
-                
-            t_alarm = alarm.time.TimeAlarm(monotonic_time=time.monotonic() + 0.2)
-            alarm.light_sleep_until_alarms(t_alarm)
+                # EXIT CONDITIONS:
+                # 1. We've exceeded duration AND the button isn't currently held
+                # 2. AND we aren't mid-interaction (waiting for a release)
+                if (now - start_time >= duration) and button.value and not button_was_down:
+                    break
+                    
+                t_alarm = alarm.time.TimeAlarm(monotonic_time=time.monotonic() + 0.2)
+                alarm.light_sleep_until_alarms(t_alarm)
 
-#  something like:
-#  main = Main()
-#  main.health_check()
-#      .ap_mode()
-#      .polling_loop()
+    def _update_display(self, data):
+        if data == None:
+            self.atom.display.color = Color.RED
+            return
+        logger.info(f'Heartbeat: {data}')
+        power = data.get("POWER", "OFF")
+        if power == 'ON':
+            self.atom.display.color = Color.GREEN
+            return
+        self.atom.display.color = Color.OFF
 
-while True:
-    data = tasmota.power_status()
-    update_display(data)
-    wait_for_next_check(CHECK_INTERVAL)
+App().health_check() \
+     .config_mode()  \
+     .main()
 
+logger.info('Program terminated')
